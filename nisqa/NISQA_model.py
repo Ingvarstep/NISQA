@@ -25,7 +25,8 @@ class nisqaModel(object):
     '''      
     def __init__(self, args):
         self.args = args
-        
+        self.args['ms_max_segments'] = 70000
+
         if 'mode' not in self.args:
             self.args['mode'] = 'main'
             
@@ -37,7 +38,6 @@ class nisqaModel(object):
         
         if self.args['mode']=='main':
             print(yaml.dump(self.args, default_flow_style=None, sort_keys=False))
-
     def train(self):
         
         if self.args['dim']==True:
@@ -743,8 +743,11 @@ class nisqaModel(object):
             
     
     def _loadDatasetsFolder(self):
-        files = glob( os.path.join(self.args['data_dir'], '*.wav') )
-        files = [os.path.basename(files) for files in files]
+        wav_files = glob(os.path.join(self.args['data_dir'], '*.wav'))
+        mp4_files = glob(os.path.join(self.args['data_dir'], '*.mp4'))
+        all_files = wav_files + mp4_files
+
+        files = [os.path.basename(f) for f in all_files]
         df_val = pd.DataFrame(files, columns=['deg'])
      
         print('# files: {}'.format( len(df_val) ))

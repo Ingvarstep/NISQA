@@ -9,12 +9,14 @@ import math
 
 import librosa as lb
 import numpy as np
+from pathlib import Path
 import pandas as pd; pd.options.mode.chained_assignment = None
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 from scipy.stats import pearsonr
 from scipy.optimize import minimize
+import moviepy as mp
 
 import torch
 import torch.nn as nn
@@ -2281,6 +2283,29 @@ def segment_specs(file_path, x, seg_length, seg_hop=1, max_length=None):
                 
     return x, np.array(n_wins)
 
+def load_audio(file_path, sr, ms_channel):
+    if ms_channel is not None:
+        y, sr = lb.load(file_path, sr=sr, mono=False)
+        if len(y.shape)>1:
+            y = y[ms_channel, :]
+    else:
+        y, sr = lb.load(file_path, sr=sr)
+    return y, sr
+
+def load_file(file_path: Path, sr: int = 44100, ms_channel=None):
+    file_path = Path(file_path)
+
+    if file_path.suffix == '.mp4':
+        video = mp.VideoFileClip(str(file_path))
+        sr = 44100
+        y = video.audio.to_soundarray(fps=sr)
+        if y.ndim == 2:
+            y = y.mean(axis=1)
+    else:
+        y, sr = load_audio(file_path, sr, ms_channel)
+
+    return y, sr
+
 def get_librosa_melspec(
     file_path,
     sr=48e3,
@@ -2296,12 +2321,7 @@ def get_librosa_melspec(
     '''    
     # Calc spec
     try:
-        if ms_channel is not None:
-            y, sr = lb.load(file_path, sr=sr, mono=False)
-            if len(y.shape)>1:
-                y = y[ms_channel, :]
-        else:
-            y, sr = lb.load(file_path, sr=sr)
+        y, sr = load_file(file_path, sr, ms_channel)
     except:
         raise ValueError('Could not load file {}'.format(file_path))
     
