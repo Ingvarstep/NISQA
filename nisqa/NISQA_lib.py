@@ -25,7 +25,20 @@ from torch.nn.utils.rnn import pad_packed_sequence
 from torch.nn.utils.rnn import pack_padded_sequence
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
+from torch.utils.data.dataloader import default_collate
 
+def collate_remove_none(batch):
+    """
+    Filters out None samples from the incoming batch list,
+    then applies the default PyTorch collate_fn to the remaining samples.
+    """
+    # Remove any samples that are None
+    batch = [sample for sample in batch if sample is not None]
+    # If all samples were None, return an empty list or raise – here we return empty
+    if len(batch) == 0:
+        return []
+    # Otherwise collate normally
+    return default_collate(batch)
 
 #%% Models
 class NISQA(nn.Module):
@@ -1429,7 +1442,8 @@ def predict_mos(model, ds, bs, dev, num_workers=0):
                     shuffle=False,
                     drop_last=False,
                     pin_memory=False,
-                    num_workers=num_workers)
+                    num_workers=num_workers,
+                    collate_fn=collate_remove_none)
     model.to(dev)
     model.eval()
     with torch.no_grad():
@@ -1450,21 +1464,46 @@ def predict_dim(model, ds, bs, dev, num_workers=0):
                     shuffle=False,
                     drop_last=False,
                     pin_memory=False,
-                    num_workers=num_workers)
+                    num_workers=num_workers,
+                    collate_fn=collate_remove_none)
     model.to(dev)
     model.eval()
+
     with torch.no_grad():
-        y_hat_list = [ [model(xb.to(dev), n_wins.to(dev)).cpu().numpy(), yb.cpu().numpy()] for xb, yb, (idx, n_wins) in dl]
-    yy = np.concatenate( y_hat_list, axis=1 )
-    
-    y_hat = yy[0,:,:]
-    y = yy[1,:,:]
-    
-    ds.df['mos_pred'] = y_hat[:,0].reshape(-1,1)
-    ds.df['noi_pred'] = y_hat[:,1].reshape(-1,1)
-    ds.df['dis_pred'] = y_hat[:,2].reshape(-1,1)
-    ds.df['col_pred'] = y_hat[:,3].reshape(-1,1)
-    ds.df['loud_pred'] = y_hat[:,4].reshape(-1,1)
+        y_hat_list = []
+        for batch in dl:
+            try:
+                xb, yb, (idx, n_wins) = batch
+
+                preds = model(xb.to(dev), n_wins.to(dev)).cpu().numpy()
+            except Exception:
+                # on error: produce a zero‐array of the same shape
+                batch_size = xb.shape[0]
+                # if yb is (B, D), use D; if it's (B,), treat D=1
+                if yb.ndim > 1:
+                    num_outputs = yb.shape[1]
+                else:
+                    num_outputs = 1
+                preds = np.zeros((batch_size, num_outputs))
+
+            # always record the true labels
+            labels = yb.cpu().numpy()
+
+            # append exactly the same structure as before:
+            # result[i][0] = preds, result[i][1] = labels
+            y_hat_list.append([preds, labels])
+
+        # now reconstruct your big array just as you did
+        yy = np.concatenate(y_hat_list, axis=1)
+        y_hat = yy[0, :, :]
+        y      = yy[1, :, :]
+
+        # and finally assign back into your dataframe
+        ds.df['mos_pred']  = y_hat[:, 0].reshape(-1, 1)
+        ds.df['noi_pred']  = y_hat[:, 1].reshape(-1, 1)
+        ds.df['dis_pred']  = y_hat[:, 2].reshape(-1, 1)
+        ds.df['col_pred']  = y_hat[:, 3].reshape(-1, 1)
+        ds.df['loud_pred'] = y_hat[:, 4].reshape(-1, 1)
     
     return y_hat, y
 
@@ -2161,7 +2200,7 @@ class SpeechQualityDataset(Dataset):
                   
             return spec
             
-    def __getitem__(self, index):
+    def get_item(self, index):
         assert isinstance(index, int), 'index must be integer (no slice)'
 
         if self.to_memory:
@@ -2234,6 +2273,13 @@ class SpeechQualityDataset(Dataset):
 
         return x_spec_seg, y, (index, n_wins)
 
+    def __getitem__(self, index):
+        try:
+            x_spec_seg, y, (index, n_wins) = self.get_item(index)
+            return x_spec_seg, y, (index, n_wins)
+        except:
+            return None
+        
     def __len__(self):
         return len(self.df)
 
@@ -2319,35 +2365,33 @@ def get_librosa_melspec(
     '''
     Calculate mel-spectrograms with Librosa.
     '''    
-    # Calc spec
     try:
         y, sr = load_file(file_path, sr, ms_channel)
+        hop_length = int(sr * hop_length)
+        win_length = int(sr * win_length)
+
+        S = lb.feature.melspectrogram(
+            y=y,
+            sr=sr,
+            S=None,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            window='hann',
+            center=True,
+            pad_mode='reflect',
+            power=1.0,
+        
+            n_mels=n_mels,
+            fmin=0.0,
+            fmax=fmax,
+            htk=False,
+            norm='slaney',
+            )
+        spec = lb.core.amplitude_to_db(S, ref=1.0, amin=1e-4, top_db=80.0)
     except:
-        raise ValueError('Could not load file {}'.format(file_path))
-    
-    hop_length = int(sr * hop_length)
-    win_length = int(sr * win_length)
-
-    S = lb.feature.melspectrogram(
-        y=y,
-        sr=sr,
-        S=None,
-        n_fft=n_fft,
-        hop_length=hop_length,
-        win_length=win_length,
-        window='hann',
-        center=True,
-        pad_mode='reflect',
-        power=1.0,
-    
-        n_mels=n_mels,
-        fmin=0.0,
-        fmax=fmax,
-        htk=False,
-        norm='slaney',
-        )
-
-    spec = lb.core.amplitude_to_db(S, ref=1.0, amin=1e-4, top_db=80.0)
+        print('Could not load file {}'.format(file_path))
+        spec = 0.0
     return spec
 
 

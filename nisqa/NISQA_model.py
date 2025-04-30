@@ -747,7 +747,8 @@ class nisqaModel(object):
         mp4_files = glob(os.path.join(self.args['data_dir'], '*.mp4'))
         all_files = wav_files + mp4_files
 
-        files = [os.path.basename(f) for f in all_files]
+        files = [os.path.basename(f) for f in all_files][:]
+
         df_val = pd.DataFrame(files, columns=['deg'])
      
         print('# files: {}'.format( len(df_val) ))
