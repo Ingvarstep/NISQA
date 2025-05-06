@@ -62,7 +62,9 @@ class nisqaModel(object):
                 self.ds_val, 
                 self.args['tr_bs_val'],
                 self.dev,
-                num_workers=self.args['tr_num_workers'])
+                num_workers=self.args['tr_num_workers'],
+                csv_path = os.path.join(self.args['output_dir'], 'NISQA_results_rt.csv')
+            )
         else:
             y_val_hat, y_val = NL.predict_mos(
                 self.model, 
@@ -77,7 +79,6 @@ class nisqaModel(object):
                 os.path.join(self.args['output_dir'], 'NISQA_results.csv'), 
                 index=False)
             
-        print(self.ds_val.df.to_string(index=False))
         return self.ds_val.df
 
     def _train_mos(self):

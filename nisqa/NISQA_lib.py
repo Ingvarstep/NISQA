@@ -3,10 +3,11 @@
 @author: Gabriel Mittag, TU-Berlin
 """
 import os
+import csv
 import multiprocessing
 import copy
 import math
-
+from typing import List, Tuple
 import librosa as lb
 import numpy as np
 from pathlib import Path
@@ -1454,57 +1455,103 @@ def predict_mos(model, ds, bs, dev, num_workers=0):
     ds.df['mos_pred'] = y_hat.astype(dtype=float)
     return y_hat, y
 
-def predict_dim(model, ds, bs, dev, num_workers=0):     
-    '''
-    predict_dim: predicts MOS and dimensions of the given dataset with given 
-    model. Used for NISQA_DIM model.
-    '''        
-    dl = DataLoader(ds,
-                    batch_size=bs,
-                    shuffle=False,
-                    drop_last=False,
-                    pin_memory=False,
-                    num_workers=num_workers,
-                    collate_fn=collate_remove_none)
-    model.to(dev)
-    model.eval()
+def predict_dim(
+    model,
+    ds,
+    bs: int,
+    dev: torch.device | str,
+    num_workers: int = 0,
+    csv_path: str | Path = "results/scores.csv",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Predict MOS & dimensions with *model* on *ds* and stream results to *csv_path*.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+    ds    : torch.utils.data.Dataset
+        Must expose ``df`` attribute (pandas.DataFrame) that already contains
+        ground‑truth columns and uses positional integer index ↔ sample mapping.
+    bs : int
+        Batch size.
+    dev : torch.device or str
+        Device on which to run the model.
+    num_workers : int, optional
+        DataLoader workers.
+    csv_path : str or Path, optional
+        Where to save running results (default ``results/scores.csv``).
+
+    Returns
+    -------
+    y_hat : np.ndarray  # shape = (N, 5)
+    y     : np.ndarray  # shape = (N, 5)
+    """
+    csv_path = Path(csv_path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Prepare CSV header once
+    header = [
+        "index",                       # row index in ds.df
+        "mos_pred", "noi_pred", "dis_pred", "col_pred", "loud_pred",
+        "mos_true", "noi_true", "dis_true", "col_true", "loud_true",
+    ]
+    with csv_path.open("w", newline="") as f:
+        csv.writer(f).writerow(header)
+
+    dl = DataLoader(
+        ds,
+        batch_size=bs,
+        shuffle=False,
+        drop_last=False,
+        pin_memory=False,
+        num_workers=num_workers,
+        collate_fn=collate_remove_none,
+    )
+
+    model.to(dev).eval()
+
+    y_hat_list: List[np.ndarray] = []
+    y_true_list: List[np.ndarray] = []
+    idx_list: List[np.ndarray] = []
 
     with torch.no_grad():
-        y_hat_list = []
-        for batch in dl:
+        for xb, yb, (idx, n_wins) in dl:
             try:
-                xb, yb, (idx, n_wins) = batch
-
                 preds = model(xb.to(dev), n_wins.to(dev)).cpu().numpy()
             except Exception:
-                # on error: produce a zero‐array of the same shape
+                # graceful fallback ‑‑ keep size consistent
                 batch_size = xb.shape[0]
-                # if yb is (B, D), use D; if it's (B,), treat D=1
-                if yb.ndim > 1:
-                    num_outputs = yb.shape[1]
-                else:
-                    num_outputs = 1
-                preds = np.zeros((batch_size, num_outputs))
+                num_outputs = yb.shape[1] if yb.ndim > 1 else 1
+                preds = np.zeros((batch_size, num_outputs), dtype=np.float32)
 
-            # always record the true labels
             labels = yb.cpu().numpy()
 
-            # append exactly the same structure as before:
-            # result[i][0] = preds, result[i][1] = labels
-            y_hat_list.append([preds, labels])
+            # ---- stream to CSV ----
+            batch_df = pd.DataFrame(
+                np.column_stack([idx.numpy(), preds, labels]),
+                columns=header,
+            )
+            # append, no header
+            batch_df.to_csv(csv_path, mode="a", header=False, index=False)
 
-        # now reconstruct your big array just as you did
-        yy = np.concatenate(y_hat_list, axis=1)
-        y_hat = yy[0, :, :]
-        y      = yy[1, :, :]
+            # ---- keep for return value ----
+            y_hat_list.append(preds)
+            y_true_list.append(labels)
+            idx_list.append(idx.numpy())
 
-        # and finally assign back into your dataframe
-        ds.df['mos_pred']  = y_hat[:, 0].reshape(-1, 1)
-        ds.df['noi_pred']  = y_hat[:, 1].reshape(-1, 1)
-        ds.df['dis_pred']  = y_hat[:, 2].reshape(-1, 1)
-        ds.df['col_pred']  = y_hat[:, 3].reshape(-1, 1)
-        ds.df['loud_pred'] = y_hat[:, 4].reshape(-1, 1)
-    
+    # ----- consolidate outputs for the caller -----
+    # restore original ordering just in case
+    order = np.concatenate(idx_list).argsort()
+    y_hat = np.vstack(y_hat_list)[order]
+    y     = np.vstack(y_true_list)[order]
+
+    # (optional) also update ds.df in‑memory, in case the caller needs it
+    ds.df.loc[:, "mos_pred"]  = y_hat[:, 0]
+    ds.df.loc[:, "noi_pred"]  = y_hat[:, 1]
+    ds.df.loc[:, "dis_pred"]  = y_hat[:, 2]
+    ds.df.loc[:, "col_pred"]  = y_hat[:, 3]
+    ds.df.loc[:, "loud_pred"] = y_hat[:, 4]
+
     return y_hat, y
 
 def is_const(x):
